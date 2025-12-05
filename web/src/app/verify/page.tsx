@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import dynamic from "next/dynamic";
 import { PublicKey, SystemProgram, Keypair } from "@solana/web3.js";
 import * as anchor from "@coral-xyz/anchor";
 import * as splToken from "@solana/spl-token";
@@ -10,10 +10,29 @@ import { getAnchorProgram, TOKEN_METADATA_PROGRAM_ID, getStatePda, PROGRAM_ID, A
 import { uploadImage, createMetadata, saveMetadataReference } from "@/lib/supabase-storage";
 import Link from "next/link";
 
+// Dynamically import WalletMultiButton with SSR disabled to prevent hydration errors
+const WalletMultiButton = dynamic(
+  async () => (await import("@solana/wallet-adapter-react-ui")).WalletMultiButton,
+  { ssr: false }
+);
+
 export default function VerifyPage() {
-  const { publicKey, signTransaction, signAllTransactions } = useWallet();
+  const { publicKey, signTransaction, signAllTransactions, wallet, connected } = useWallet();
   const { connection } = useConnection();
   const [loading, setLoading] = useState(false);
+
+  // Debug wallet state
+  useEffect(() => {
+    console.log("[DEBUG] VerifyPage - Wallet state:", {
+      connected,
+      publicKey: publicKey?.toBase58(),
+      hasSignTransaction: !!signTransaction,
+      hasSignAllTransactions: !!signAllTransactions,
+      walletName: wallet?.adapter?.name,
+      walletReadyState: wallet?.adapter?.readyState,
+      connectionEndpoint: connection?.rpcEndpoint,
+    });
+  }, [connected, publicKey, signTransaction, signAllTransactions, wallet, connection]);
   const [uploading, setUploading] = useState(false);
   const [txSignature, setTxSignature] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -104,7 +123,18 @@ export default function VerifyPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    console.log("[DEBUG] handleSubmit called");
+    console.log("[DEBUG] Wallet state:", {
+      hasPublicKey: !!publicKey,
+      publicKey: publicKey?.toBase58(),
+      hasSignTransaction: !!signTransaction,
+      hasSignAllTransactions: !!signAllTransactions,
+      signTransactionType: typeof signTransaction,
+    });
+
     if (!publicKey || !signTransaction) {
+      console.error("[DEBUG] Wallet validation failed in handleSubmit");
       setError("Please connect your wallet");
       return;
     }
@@ -120,11 +150,20 @@ export default function VerifyPage() {
     setSuccess(null);
 
     try {
-      const program = getAnchorProgram(connection, {
+      console.log("[DEBUG] Creating wallet object for mint transaction");
+      const walletObj = {
         publicKey: publicKey!,
         signTransaction: signTransaction!,
         signAllTransactions: signAllTransactions,
-      } as any);
+      };
+      
+      console.log("[DEBUG] Wallet object:", {
+        hasPublicKey: !!walletObj.publicKey,
+        hasSignTransaction: !!walletObj.signTransaction,
+        hasSignAllTransactions: !!walletObj.signAllTransactions,
+      });
+
+      const program = getAnchorProgram(connection, walletObj as any);
 
       // Generate mint keypair
       const mintKeypair = Keypair.generate();
@@ -166,8 +205,15 @@ export default function VerifyPage() {
       // Get state PDA
       const statePda = getStatePda();
 
+      console.log("[DEBUG] Checking if state account exists...");
+      console.log("[DEBUG] State PDA:", statePda.toBase58());
+      console.log("[DEBUG] Connection endpoint:", connection.rpcEndpoint);
+      
       // Check if state is initialized
+      console.log("[DEBUG] Calling connection.getAccountInfo() - this might take a moment...");
       const stateAccount = await connection.getAccountInfo(statePda);
+      console.log("[DEBUG] getAccountInfo completed, stateAccount exists:", !!stateAccount);
+      
       if (!stateAccount) {
         // State not initialized - only admin can initialize
         if (!publicKey.equals(ADMIN_PUBKEY)) {
@@ -182,18 +228,36 @@ export default function VerifyPage() {
         );
       }
       
-      // State exists - verify that the caller is the authorized verifier
+      // State exists - verify that the caller is in the authorized verifiers list
       const stateData = await (program.account as any).state.fetch(statePda);
-      // The field name in the IDL is "authorized_verifier" (snake_case)
-      const authorizedVerifierPubkey = stateData?.authorized_verifier || stateData?.authorizedVerifier;
-      if (!authorizedVerifierPubkey || !authorizedVerifierPubkey.equals(publicKey)) {
+      const verifiersList = stateData?.verifiers || [];
+      
+      // Convert verifiers to Pubkey array for comparison
+      const verifierPubkeys = verifiersList.map((v: any) => {
+        if (typeof v === 'string') {
+          return new PublicKey(v);
+        }
+        return v;
+      });
+      
+      const isAuthorized = verifierPubkeys.some((v: PublicKey) => v.equals(publicKey));
+      
+      if (!isAuthorized) {
+        const verifierAddresses = verifierPubkeys.map((v: PublicKey) => v.toBase58()).join(", ");
         throw new Error(
-          `You are not an authorized verifier. Authorized verifier: ${authorizedVerifierPubkey?.toBase58() || 'unknown'}. Only authorized verifiers can mint NFTs.`
+          `You are not an authorized verifier. Authorized verifiers: ${verifierAddresses || 'none'}. Only authorized verifiers can mint NFTs.`
         );
       }
 
+      console.log("[DEBUG] Building mint transaction:", {
+        productId: formData.productId,
+        mint: mintPubkey.toBase58(),
+        owner: ownerPubkey.toBase58(),
+        verifier: publicKey.toBase58(),
+      });
+
       // Call mint_auth_nft
-      const tx = await program.methods
+      const txBuilder = program.methods
         .mintAuthNft(
           formData.productId,
           formData.brand,
@@ -214,13 +278,67 @@ export default function VerifyPage() {
           rent: anchor.web3.SYSVAR_RENT_PUBKEY,
           tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
         })
-        .signers([mintKeypair])
-        .rpc();
+        .signers([mintKeypair]);
 
+      console.log("[DEBUG] Transaction builder created");
+      console.log("[DEBUG] Provider state before RPC:", {
+        providerPublicKey: (program.provider as any).publicKey?.toBase58(),
+        providerWallet: (program.provider as any).wallet ? Object.keys((program.provider as any).wallet) : null,
+      });
+      console.log("[DEBUG] Signers:", [mintKeypair.publicKey.toBase58()]);
+
+      // Build transaction manually instead of using .rpc() to have better control
+      console.log("[DEBUG] Building transaction manually...");
+      const transaction = await txBuilder.transaction();
+      
+      console.log("[DEBUG] Transaction built, fetching recent blockhash...");
+      // Get recent blockhash - required for transaction signing
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      transaction.recentBlockhash = blockhash;
+      transaction.lastValidBlockHeight = lastValidBlockHeight;
+      
+      // Set fee payer - required for transaction signing
+      transaction.feePayer = publicKey;
+      
+      console.log("[DEBUG] Blockhash and fee payer set, adding signers...");
+      transaction.partialSign(mintKeypair);
+      
+      console.log("[DEBUG] Transaction partially signed, requesting wallet signature...");
+      console.log("[DEBUG] About to call signTransaction - Phantom should prompt now!");
+      
+      if (!signTransaction) {
+        throw new Error("signTransaction is not available");
+      }
+
+      // Sign the transaction with the wallet
+      const signedTx = await signTransaction(transaction);
+      
+      console.log("[DEBUG] Transaction signed by wallet, sending...");
+      
+      // Send the transaction
+      const tx = await connection.sendRawTransaction(signedTx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+      
+      console.log("[DEBUG] Transaction sent, confirming...");
+      
+      // Wait for confirmation
+      await connection.confirmTransaction(tx, "confirmed");
+      
+      console.log("[DEBUG] Transaction confirmed:", tx);
+
+      console.log("[DEBUG] Transaction sent successfully:", tx);
       setTxSignature(tx);
       setSuccess("NFT minted successfully!");
     } catch (err: any) {
-      console.error("Error minting NFT:", err);
+      console.error("[DEBUG] Error minting NFT:", err);
+      console.error("[DEBUG] Error details:", {
+        message: err.message,
+        name: err.name,
+        stack: err.stack,
+        logs: err.logs,
+      });
       setError(err.message || "Failed to mint NFT");
     } finally {
       setLoading(false);

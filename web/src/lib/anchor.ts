@@ -20,21 +20,51 @@ export function getAnchorProgram(
   wallet: any,
   commitment: Commitment = "confirmed"
 ): Program<Idl> {
+  console.log("[DEBUG] getAnchorProgram called with:", {
+    hasConnection: !!connection,
+    connectionEndpoint: connection?.rpcEndpoint,
+    walletType: typeof wallet,
+    walletKeys: wallet ? Object.keys(wallet) : null,
+    hasPublicKey: !!wallet?.publicKey,
+    publicKey: wallet?.publicKey?.toBase58?.() || null,
+    hasSignTransaction: !!wallet?.signTransaction,
+    hasSignAllTransactions: !!wallet?.signAllTransactions,
+    signTransactionType: typeof wallet?.signTransaction,
+    commitment,
+  });
+
   const provider = new AnchorProvider(connection, wallet as Wallet, {
     commitment,
   });
 
+  console.log("[DEBUG] AnchorProvider created:", {
+    providerPublicKey: provider.publicKey?.toBase58?.() || null,
+    providerWallet: provider.wallet ? Object.keys(provider.wallet) : null,
+  });
+
   // Program constructor: (idl, provider) - program ID is read from IDL
-  return new Program(idl as Idl, provider) as Program<Idl>;
+  const program = new Program(idl as Idl, provider) as Program<Idl>;
+  
+  console.log("[DEBUG] Program created successfully");
+  
+  return program;
 }
 
-// Helper to derive state PDA
+// Helper to derive state PDA with bump
 export function getStatePda(): PublicKey {
   const [statePda] = PublicKey.findProgramAddressSync(
     [Buffer.from("state")],
     PROGRAM_ID
   );
   return statePda;
+}
+
+// Helper to get state PDA with bump
+export function getStatePdaWithBump(): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("state")],
+    PROGRAM_ID
+  );
 }
 
 export { PROGRAM_ID };

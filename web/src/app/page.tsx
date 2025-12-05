@@ -1,14 +1,26 @@
 "use client";
 
 import { useWallet } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { ADMIN_PUBKEY } from "@/lib/anchor";
+
+// Dynamically import WalletMultiButton with SSR disabled to prevent hydration errors
+const WalletMultiButton = dynamic(
+  async () => (await import("@solana/wallet-adapter-react-ui")).WalletMultiButton,
+  { ssr: false }
+);
 
 export default function Home() {
   const { publicKey } = useWallet();
   const router = useRouter();
+  const [mounted, setMounted] = useState(false);
+
+  // Only render wallet-dependent content on client
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Redirect admin to admin page
   useEffect(() => {
@@ -26,16 +38,20 @@ export default function Home() {
           </p>
 
           <div className="mb-4">
-            <WalletMultiButton />
+            {mounted && <WalletMultiButton />}
           </div>
 
-          {publicKey ? (
+          {mounted && publicKey ? (
             <p className="text-sm text-emerald-300 mt-2 mb-6">
               Connected as: <span className="font-mono">{publicKey.toBase58()}</span>
             </p>
-          ) : (
+          ) : mounted ? (
             <p className="text-sm text-slate-400 mt-2 mb-6">
               Connect your Solana wallet to start verifying items or viewing certificates.
+            </p>
+          ) : (
+            <p className="text-sm text-slate-400 mt-2 mb-6">
+              Loading...
             </p>
           )}
 

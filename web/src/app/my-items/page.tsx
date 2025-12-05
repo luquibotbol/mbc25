@@ -2,9 +2,17 @@
 
 import { useState, useEffect } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
-import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
-import { PublicKey } from "@solana/web3.js";
+import dynamic from "next/dynamic";
+import { PublicKey, Transaction, SystemProgram } from "@solana/web3.js";
+import * as splToken from "@solana/spl-token";
 import Link from "next/link";
+import Image from "next/image";
+
+// Dynamically import WalletMultiButton with SSR disabled to prevent hydration errors
+const WalletMultiButton = dynamic(
+  async () => (await import("@solana/wallet-adapter-react-ui")).WalletMultiButton,
+  { ssr: false }
+);
 
 interface NFTItem {
   mint: string;
@@ -16,13 +24,33 @@ interface NFTItem {
 }
 
 export default function MyItemsPage() {
-  const { publicKey } = useWallet();
+  const { publicKey, signTransaction } = useWallet();
   const { connection } = useConnection();
   const [nfts, setNfts] = useState<NFTItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transferModal, setTransferModal] = useState<{ open: boolean; nft: NFTItem | null }>({
+    open: false,
+    nft: null,
+  });
+  const [recipientAddress, setRecipientAddress] = useState("");
+  const [transferring, setTransferring] = useState(false);
 
   useEffect(() => {
+    // Always show the hardcoded Louis Vuitton bag
+    const louisVuittonBag: NFTItem = {
+      mint: "LV-123451243",
+      name: "Louis Vuitton Bag",
+      uri: "",
+      image: "/my-items/lv.jpg",
+      description: "Louis Vuitton Bag - Product ID: LV-123451243",
+      attributes: [
+        { trait_type: "Brand", value: "Louis Vuitton" },
+        { trait_type: "Product ID", value: "LV-123451243" },
+      ],
+    };
+    setNfts([louisVuittonBag]);
+    
     if (publicKey && connection) {
       fetchNFTs();
     }
@@ -148,12 +176,121 @@ export default function MyItemsPage() {
       const nftResults = await Promise.all(nftPromises);
       const validNfts = nftResults.filter((nft) => nft !== null) as NFTItem[];
       
-      setNfts(validNfts);
+      // Keep the hardcoded Louis Vuitton bag and add fetched NFTs
+      const louisVuittonBag: NFTItem = {
+        mint: "LV-123451243",
+        name: "Louis Vuitton Bag",
+        uri: "",
+        image: "/my-items/lv.jpg",
+        description: "Louis Vuitton Bag - Product ID: LV-123451243",
+        attributes: [
+          { trait_type: "Brand", value: "Louis Vuitton" },
+          { trait_type: "Product ID", value: "LV-123451243" },
+        ],
+      };
+      
+      // Filter out the hardcoded item if it was already added, then add it back at the beginning
+      const otherNfts = validNfts.filter((nft) => nft.mint !== "LV-123451243");
+      setNfts([louisVuittonBag, ...otherNfts]);
     } catch (err: any) {
       console.error("Error fetching NFTs:", err);
       setError(err.message || "Failed to fetch NFTs");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleTransfer = async () => {
+    if (!publicKey || !signTransaction || !transferModal.nft || !recipientAddress) {
+      return;
+    }
+
+    // Skip transfer for hardcoded LV items
+    if (transferModal.nft.mint.startsWith("LV-")) {
+      setError("This is a demo item and cannot be transferred.");
+      setTransferModal({ open: false, nft: null });
+      return;
+    }
+
+    setTransferring(true);
+    setError(null);
+
+    try {
+      // Validate recipient address
+      const recipientPubkey = new PublicKey(recipientAddress);
+      const mintPubkey = new PublicKey(transferModal.nft.mint);
+
+      // Get source token account (current owner's ATA)
+      const sourceTokenAccount = await splToken.getAssociatedTokenAddress(
+        mintPubkey,
+        publicKey,
+        false,
+        splToken.TOKEN_PROGRAM_ID,
+        splToken.ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+
+      // Get or create destination token account (recipient's ATA)
+      const destinationTokenAccount = await splToken.getAssociatedTokenAddress(
+        mintPubkey,
+        recipientPubkey,
+        false,
+        splToken.TOKEN_PROGRAM_ID,
+        splToken.ASSOCIATED_TOKEN_PROGRAM_ID
+      );
+
+      // Check if destination token account exists, create if not
+      const destinationAccountInfo = await connection.getAccountInfo(destinationTokenAccount);
+      const transaction = new Transaction();
+
+      if (!destinationAccountInfo) {
+        // Create associated token account instruction
+        transaction.add(
+          splToken.createAssociatedTokenAccountInstruction(
+            publicKey, // payer
+            destinationTokenAccount, // ata
+            recipientPubkey, // owner
+            mintPubkey, // mint
+            splToken.TOKEN_PROGRAM_ID,
+            splToken.ASSOCIATED_TOKEN_PROGRAM_ID
+          )
+        );
+      }
+
+      // Add transfer instruction
+      transaction.add(
+        splToken.createTransferInstruction(
+          sourceTokenAccount,
+          destinationTokenAccount,
+          publicKey,
+          1, // amount (1 for NFT)
+          [],
+          splToken.TOKEN_PROGRAM_ID
+        )
+      );
+
+      // Get recent blockhash
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+      transaction.recentBlockhash = blockhash;
+      transaction.lastValidBlockHeight = lastValidBlockHeight;
+      transaction.feePayer = publicKey;
+
+      // Sign and send transaction
+      const signedTransaction = await signTransaction(transaction);
+      const signature = await connection.sendRawTransaction(signedTransaction.serialize());
+      await connection.confirmTransaction(signature, "confirmed");
+
+      // Refresh NFTs
+      await fetchNFTs();
+      
+      // Close modal and reset
+      setTransferModal({ open: false, nft: null });
+      setRecipientAddress("");
+      alert(`NFT transferred successfully! View on Explorer: https://explorer.solana.com/tx/${signature}?cluster=devnet`);
+    } catch (err: any) {
+      console.error("Transfer error:", err);
+      setError(err.message || "Failed to transfer NFT");
+    } finally {
+      setTransferring(false);
     }
   };
 
@@ -177,7 +314,80 @@ export default function MyItemsPage() {
           </div>
 
           {!publicKey ? (
-            <p className="text-slate-400">Please connect your wallet to view your NFTs</p>
+            <div>
+              <p className="text-slate-400 mb-4">Please connect your wallet to view all your NFTs</p>
+              {nfts.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {nfts.map((nft) => (
+                    <div
+                      key={nft.mint}
+                      className="border border-slate-800 rounded-xl bg-slate-900/40 p-6 hover:border-emerald-600 transition-colors"
+                    >
+                      {nft.image ? (
+                        <div className="w-full h-48 relative rounded-lg mb-4 overflow-hidden">
+                          <img
+                            src={nft.image}
+                            alt={nft.name}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                      ) : (
+                        <div className="w-full h-48 bg-slate-800 rounded-lg mb-4 flex items-center justify-center">
+                          <span className="text-slate-500">No Image</span>
+                        </div>
+                      )}
+                      <h3 className="text-xl font-semibold mb-2">{nft.name}</h3>
+                      {nft.description && (
+                        <p className="text-sm text-slate-400 mb-4 line-clamp-2">
+                          {nft.description}
+                        </p>
+                      )}
+                      {nft.attributes && nft.attributes.length > 0 && (
+                        <div className="mb-4">
+                          <p className="text-xs text-slate-500 mb-2">Attributes:</p>
+                          <div className="flex flex-wrap gap-2">
+                            {nft.attributes.slice(0, 3).map((attr: any, idx: number) => (
+                              <span
+                                key={idx}
+                                className="text-xs px-2 py-1 bg-slate-800 rounded"
+                              >
+                                {attr.trait_type}: {attr.value}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex flex-col gap-2 mt-4">
+                        {nft.mint.startsWith("LV-") ? (
+                          <div className="text-sm text-slate-400">
+                            Product ID: <span className="font-mono text-emerald-400">{nft.mint}</span>
+                          </div>
+                        ) : (
+                          <>
+                            <a
+                              href={`https://explorer.solana.com/address/${nft.mint}?cluster=devnet`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-sm text-emerald-400 hover:text-emerald-300 underline"
+                            >
+                              View on Explorer
+                            </a>
+                            {publicKey && (
+                              <button
+                                onClick={() => setTransferModal({ open: true, nft })}
+                                className="text-sm px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors"
+                              >
+                                Transfer NFT
+                              </button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           ) : loading ? (
             <p className="text-slate-400">Loading your NFTs...</p>
           ) : error ? (
@@ -194,11 +404,13 @@ export default function MyItemsPage() {
                   className="border border-slate-800 rounded-xl bg-slate-900/40 p-6 hover:border-emerald-600 transition-colors"
                 >
                   {nft.image ? (
-                    <img
-                      src={nft.image}
-                      alt={nft.name}
-                      className="w-full h-48 object-cover rounded-lg mb-4"
-                    />
+                    <div className="w-full h-48 relative rounded-lg mb-4 overflow-hidden">
+                      <img
+                        src={nft.image}
+                        alt={nft.name}
+                        className="w-full h-full object-cover"
+                      />
+                    </div>
                   ) : (
                     <div className="w-full h-48 bg-slate-800 rounded-lg mb-4 flex items-center justify-center">
                       <span className="text-slate-500">No Image</span>
@@ -225,20 +437,88 @@ export default function MyItemsPage() {
                       </div>
                     </div>
                   )}
-                  <a
-                    href={`https://explorer.solana.com/address/${nft.mint}?cluster=devnet`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-emerald-400 hover:text-emerald-300 underline"
-                  >
-                    View on Explorer
-                  </a>
+                  <div className="flex flex-col gap-2 mt-4">
+                    {nft.mint.startsWith("LV-") ? (
+                      <div className="text-sm text-slate-400">
+                        Product ID: <span className="font-mono text-emerald-400">{nft.mint}</span>
+                      </div>
+                    ) : (
+                      <>
+                        <a
+                          href={`https://explorer.solana.com/address/${nft.mint}?cluster=devnet`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-emerald-400 hover:text-emerald-300 underline"
+                        >
+                          View on Explorer
+                        </a>
+                        {publicKey && (
+                          <button
+                            onClick={() => setTransferModal({ open: true, nft })}
+                            className="text-sm px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors"
+                          >
+                            Transfer NFT
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </div>
       </div>
+
+      {/* Transfer Modal */}
+      {transferModal.open && transferModal.nft && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 max-w-md w-full">
+            <h2 className="text-2xl font-semibold mb-4">Transfer NFT</h2>
+            <div className="mb-4">
+              <p className="text-slate-300 mb-2">NFT: {transferModal.nft.name}</p>
+              <p className="text-sm text-slate-400 font-mono">{transferModal.nft.mint}</p>
+            </div>
+            <div className="mb-4">
+              <label className="block text-sm text-slate-300 mb-2">
+                Recipient Address
+              </label>
+              <input
+                type="text"
+                value={recipientAddress}
+                onChange={(e) => setRecipientAddress(e.target.value)}
+                placeholder="Enter Solana address"
+                className="w-full px-4 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+            {error && (
+              <div className="mb-4 p-3 bg-red-900/20 border border-red-700 rounded-lg text-red-300 text-sm">
+                {error}
+              </div>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setTransferModal({ open: false, nft: null });
+                  setRecipientAddress("");
+                  setError(null);
+                }}
+                className="flex-1 px-4 py-2 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
+                disabled={transferring}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleTransfer}
+                disabled={!recipientAddress || transferring}
+                className="flex-1 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {transferring ? "Transferring..." : "Transfer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

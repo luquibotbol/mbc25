@@ -6,13 +6,16 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-onchain = "PiPdvPTVMpMJ2W32Ce8uX8SLjBZ9CMDf4f9BoJBU46b"
+onchain = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkgCz7s8RDr5F"
+
+[programs.devnet]
+onchain = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkgCz7s8RDr5F"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
